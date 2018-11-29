@@ -1,14 +1,20 @@
 #include "wander_bot.h"
 #include "geometry_msgs/Twist.h"
 
-Stopper::Stopper(double forwardSpeed) {
+Stopper::Stopper(double forwardSpeed, double angleSpeed, double minAngle,
+		double maxAngle) {
 	this->forwardSpeed = forwardSpeed;
-	this->origForward = forwardSpeed;
-	this->angle = 0.0;
+	this->origAngle = angleSpeed;
+	this->minScanAngle = minAngle;
+	this->maxScanAngle = maxAngle;
 	keepMoving = true;
 	currentAngle = 0.0;
 	bestAngle = 0.0;
 	isObstacleInFront = false;
+
+	// set movement starting parameters
+	this->origForward = forwardSpeed;
+	this->angle = 0;
 
 // Advertise a new publisher for the robot's velocity command topic
 	commandPub = node.advertise<geometry_msgs::Twist>(
@@ -32,29 +38,28 @@ void Stopper::moveForward() {
 // get robot's current angle
 void Stopper::poseCallback(const nav_msgs::Odometry::ConstPtr& msg) {
 	currentAngle = msg->pose.pose.orientation.z;
-	ROS_INFO("current:[%f], best:[%f]",currentAngle,bestAngle);
+	//ROS_INFO("current:[%f], best:[%f]",currentAngle,bestAngle);
 }
 
 // Process the incoming laser scan message
 void Stopper::scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan) {
 
-	// rotate untill the robot's front is in the freest direction
+	// rotate until the robot's front is in the freest direction found
 	if (isObstacleInFront) {
 		// return to normal movement
 		if (std::abs(currentAngle - bestAngle) < 0.05) {
 			this->forwardSpeed = this->origForward;
-			this->angle = 0.0;
+			this->angle = 0;
 			isObstacleInFront = false;
-			bestAngle = 0;
 		}
 		return;
 	}
 
 	// Find the closest range between the defined minimum and maximum angles
 	int minIndex = ceil(
-			(MIN_SCAN_ANGLE - scan->angle_min) / scan->angle_increment);
+			(this->minScanAngle - scan->angle_min) / scan->angle_increment);
 	int maxIndex = floor(
-			(MAX_SCAN_ANGLE - scan->angle_min) / scan->angle_increment);
+			(this->maxScanAngle - scan->angle_min) / scan->angle_increment);
 
 	for (int currIndex = minIndex + 1; currIndex <= maxIndex; currIndex++) {
 		if (scan->ranges[currIndex] < MIN_DIST_FROM_OBSTACLE) {
@@ -63,28 +68,39 @@ void Stopper::scanCallback(const sensor_msgs::LaserScan::ConstPtr& scan) {
 		}
 	}
 
+	// if an obstacle is blocking the way
 	if (isObstacleInFront) {
+		ROS_INFO("Looking for a new route! ");
 
-		// find the freest direction
+		// find freest direction
 		float bestIndex = 0;
-		float bestDistance = 0;
-		for (int i = 0; i < scan->ranges.size(); i++) {
-			if (scan->ranges[i] > bestDistance) {
-				bestDistance = scan->ranges[i];
-				bestIndex = i;
+		float bestCount = 0;
+		int count = 0;
+
+		// find largest section of NaN and aim to it's middle
+		for (int currIndex = minIndex + 1; currIndex <= maxIndex; currIndex++) {
+			//check if nan
+			if (scan->ranges[currIndex] != scan->ranges[currIndex]) {
+				count++;
+			} else if (count > bestCount) {
+				// aim to the middle of the free section
+				bestIndex = (currIndex + (currIndex - count)) / 2;
+				bestCount = count;
+				count = 0;
+			} else {
+				count = 0;
 			}
 		}
-
-		ROS_INFO("Stop! ");
 
 		// set velocity, angle and wanted direction
 		this->forwardSpeed = 0;
 		bestAngle = bestIndex * scan->angle_increment + scan->angle_min;
 
+		// set direction of the rotation
 		if (currentAngle > bestAngle)
-			this->angle = -90.0 / 180 * M_PI;
+			this->angle = -origAngle;
 		else
-			this->angle = 90.0 / 180 * M_PI;
+			this->angle = origAngle;
 
 	} else { // if there is no obstacle - continue forward
 		this->forwardSpeed = this->origForward;
